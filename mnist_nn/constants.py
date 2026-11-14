@@ -1,0 +1,9 @@
+"""项目中共用的常量。"""
+
+IMAGE_SIZE = 28
+NUM_CLASSES = 10
+INPUT_SIZE = IMAGE_SIZE * IMAGE_SIZE
+
+# MNIST 训练集的像素级均值与标准差，用于标准化输入。
+MNIST_MEAN = 0.1307
+MNIST_STD = 0.3081

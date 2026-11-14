@@ -1,0 +1,30 @@
+[project]
+name = "pytorch-study"
+version = "0.1.0"
+description = "A simple PyTorch MLP for MNIST classification"
+readme = "README.md"
+requires-python = ">=3.15"
+dependencies = [
+    "torch>=2.15.0",
+    "torchvision>=0.29.2",
+]
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu132" }]
+torchvision = [{ index = "pytorch-cu132" }]
+
+# RTX 5080 属于 Blackwell 架构（sm_120），需要 CUDA 12.8+ 的 PyTorch 构建。
+# cu132 对应 CUDA 13.2，当前驱动 617.42 可以直接使用。
+[[tool.uv.index]]
+name = "pytorch-cu132"
+url = "https://download.pytorch.org/whl/cu132"
+explicit = true
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
