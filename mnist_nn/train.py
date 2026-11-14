@@ -18,7 +18,7 @@ from mnist_nn.data import (
     build_dataloaders,
     build_tensor_data,
 )
-from mnist_nn.model import MLP, load_model
+from mnist_nn.model import MODEL_NAMES, build_model, load_model
 from mnist_nn.utils import count_parameters, resolve_device, set_seed
 
 
@@ -122,7 +122,7 @@ def evaluate_tensors(
     labels: torch.Tensor,
     criterion: nn.Module,
     device: torch.device,
-    batch_size: int = 8192,
+    batch_size: int = 4096,
 ) -> tuple[float, float]:
     """在已经放到设备上的整块张量上评估。"""
     model.eval()
@@ -147,6 +147,7 @@ def evaluate_tensors(
 def save_checkpoint(
     path: Path,
     model: nn.Module,
+    model_name: str,
     model_config: dict[str, float | int],
     metrics: dict[str, float | int],
 ) -> None:
@@ -154,6 +155,7 @@ def save_checkpoint(
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
+            "model_name": model_name,
             "model_state_dict": model.state_dict(),
             "model_config": model_config,
             "metrics": metrics,
@@ -170,7 +172,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=5, help="训练轮数")
     parser.add_argument("--batch-size", type=int, default=64, help="批大小")
     parser.add_argument("--lr", type=float, default=1e-3, help="Adam 学习率")
-    parser.add_argument("--hidden-size", type=int, default=256, help="第一层隐藏单元数")
+    parser.add_argument(
+        "--model",
+        choices=MODEL_NAMES,
+        default="mlp",
+        help="模型结构：mlp 或 cnn",
+    )
+    parser.add_argument(
+        "--hidden-size", type=int, default=256, help="MLP 第一层隐藏单元数"
+    )
     parser.add_argument("--dropout", type=float, default=0.2, help="Dropout 概率")
     parser.add_argument(
         "--data-dir", type=Path, default=Path("data"), help="MNIST 数据目录"
@@ -268,19 +278,32 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("提示：首次运行需要联网下载数据集；也可以检查 --data-dir 是否已有数据。")
         return 1
 
-    model = MLP(hidden_size=args.hidden_size, dropout=args.dropout).to(device)
+    model = build_model(
+        args.model, hidden_size=args.hidden_size, dropout=args.dropout
+    ).to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
-    checkpoint_path = args.output_dir / "mnist_mlp.pt"
-    history_path = args.output_dir / "history.json"
+    model_config: dict[str, float | int] = {"dropout": args.dropout}
+    if args.model == "mlp":
+        model_config["hidden_size"] = args.hidden_size
+
+    checkpoint_path = args.output_dir / f"mnist_{args.model}.pt"
+    history_path = args.output_dir / f"history_{args.model}.json"
+
+    if args.model == "mlp":
+        model_description = (
+            f"MLP(hidden_size={args.hidden_size}, dropout={args.dropout})"
+        )
+    else:
+        model_description = f"CNN(dropout={args.dropout})"
 
     print(f"设备        : {device}")
     print(
         "数据集      : "
         f"{args.data_dir}（训练 {train_count} / 验证 {val_count} / 测试 {test_count}）"
     )
-    print(f"模型        : MLP(hidden_size={args.hidden_size}, dropout={args.dropout})")
+    print(f"模型        : {model_description}")
     print(f"参数量      : {count_parameters(model):,}")
     print(
         f"训练配置    : epochs={args.epochs}, batch_size={args.batch_size}, lr={args.lr}"
@@ -323,7 +346,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             save_checkpoint(
                 checkpoint_path,
                 model,
-                model_config={"hidden_size": args.hidden_size, "dropout": args.dropout},
+                model_name=args.model,
+                model_config=model_config,
                 metrics={
                     "epoch": epoch,
                     "val_loss": val_loss,

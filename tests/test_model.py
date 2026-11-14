@@ -4,11 +4,17 @@ import pytest
 import torch
 
 from mnist_nn.constants import INPUT_SIZE, NUM_CLASSES
-from mnist_nn.model import MLP
+from mnist_nn.model import CNN, MLP, build_model
 
 
-def test_output_shape() -> None:
+def test_mlp_output_shape() -> None:
     model = MLP(hidden_size=32, dropout=0.0)
+    logits = model(torch.randn(4, 1, 28, 28))
+    assert logits.shape == (4, NUM_CLASSES)
+
+
+def test_cnn_output_shape() -> None:
+    model = CNN(dropout=0.0)
     logits = model(torch.randn(4, 1, 28, 28))
     assert logits.shape == (4, NUM_CLASSES)
 
@@ -23,6 +29,26 @@ def test_forward_and_backward() -> None:
     assert all(parameter.grad is not None for parameter in model.parameters())
 
 
+def test_cnn_forward_and_backward() -> None:
+    model = CNN(dropout=0.0)
+    logits = model(torch.randn(2, 1, 28, 28))
+    loss = logits.sum()
+    loss.backward()
+
+    assert logits.shape == (2, NUM_CLASSES)
+    assert all(parameter.grad is not None for parameter in model.parameters())
+
+
+def test_build_model() -> None:
+    assert isinstance(build_model("mlp"), MLP)
+    assert isinstance(build_model("cnn"), CNN)
+
+
+def test_build_model_rejects_unknown_name() -> None:
+    with pytest.raises(ValueError):
+        build_model("transformer")
+
+
 def test_output_size_matches_input_definition() -> None:
     assert INPUT_SIZE == 28 * 28
 
@@ -35,3 +61,8 @@ def test_invalid_hidden_size() -> None:
 def test_invalid_dropout() -> None:
     with pytest.raises(ValueError):
         MLP(dropout=1.0)
+
+
+def test_invalid_cnn_dropout() -> None:
+    with pytest.raises(ValueError):
+        CNN(dropout=1.0)

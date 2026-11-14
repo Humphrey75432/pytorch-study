@@ -139,7 +139,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     metrics = payload.get("metrics", {})
     if metrics:
         print(
-            f"模型：{args.checkpoint}（epoch {metrics.get('epoch')}，"
+            f"模型：{model.__class__.__name__} | {args.checkpoint}"
+            f"（epoch {metrics.get('epoch')}，"
             f"验证准确率 {float(metrics.get('val_accuracy', 0.0)):.2%}）"
         )
     print(f"设备：{device}\n")
