@@ -11,6 +11,7 @@
 - 加载模型预测，并生成带标签的预测结果图
 - 可视化训练曲线、预测错误样本和第一层权重
 - 学习率调度、早停、数据增强和 Dropout 对比实验
+- FastAPI + HTML Canvas 手写数字识别页面
 - 基础单元测试
 
 项目使用 [uv](https://docs.astral.sh/uv/) 管理 Python 解释器、虚拟环境和依赖。
@@ -67,6 +68,66 @@ uv run python -m mnist_nn.predict --checkpoint artifacts/mnist_cnn.pt --count 16
 ```
 
 脚本会读取测试集前 16 张图片，打印真实标签、预测标签和置信度，并生成对应的 PNG 图片。
+
+## 手写数字识别页面
+
+项目自带一个 FastAPI + HTML Canvas 页面，可以直接在浏览器里手写数字并调用当前模型。
+
+```powershell
+uv run python -m mnist_nn.webapp
+```
+
+也可以使用根目录的便捷入口：
+
+```powershell
+uv run python app.py
+```
+
+启动后打开：
+
+```text
+http://127.0.0.1:8000
+```
+
+页面支持：
+
+- 鼠标或触屏手写
+- 清空画板
+- 显示预测数字、置信度和 Top-3 概率
+- 显示预处理后的 28×28 模型输入预览
+
+默认加载 `artifacts/mnist_cnn.pt`，也可以指定 MLP 或其他检查点：
+
+```powershell
+uv run python -m mnist_nn.webapp --checkpoint artifacts/mnist_mlp.pt --port 8001
+```
+
+处理流程：
+
+```text
+Canvas PNG
+  -> 灰度化
+  -> 裁剪数字边界
+  -> 等比缩放到 20×20
+  -> 居中放入 28×28 黑底画布
+  -> 按 MNIST 均值/标准差标准化
+  -> CNN / MLP 推理
+  -> Softmax + Top-3
+```
+
+接口：
+
+| 路径 | 说明 |
+| --- | --- |
+| `GET /` | 手写识别页面 |
+| `GET /health` | 健康检查，返回模型和设备 |
+| `POST /predict` | 接收 `{"image": "data:image/png;base64,..."}`，返回预测结果 |
+
+如果端口被占用，可以换一个：
+
+```powershell
+uv run python -m mnist_nn.webapp --port 8001
+```
 
 ## 可视化
 
@@ -174,6 +235,7 @@ TF32 和混合精度（AMP）对这个模型帮助有限，因为矩阵太小，
 ```text
 pytorch-study/
 ├── main.py                  # 便捷训练入口
+├── app.py                   # 手写识别页面便捷入口
 ├── pyproject.toml           # 项目元数据与依赖
 ├── uv.lock                  # 依赖锁定文件
 ├── mnist_nn/
@@ -185,13 +247,15 @@ pytorch-study/
 │   ├── predict.py           # 推理与预测结果可视化
 │   ├── visualize.py         # 训练曲线、错误样本、第一层权重可视化
 │   ├── compare_dropout.py   # Dropout 对比实验
+│   ├── webapp.py            # FastAPI + Canvas 手写识别页面
 │   └── utils.py             # 设备选择、随机种子等
 ├── docs/
 │   └── images/              # README 展示用图片
 └── tests/
     ├── test_model.py        # MLP/CNN 结构测试
     ├── test_training.py     # 学习率调度、早停、数据增强测试
-    └── test_visualize.py    # 可视化函数测试
+    ├── test_visualize.py    # 可视化函数测试
+    └── test_webapp.py       # Web 预处理和推理测试
 ```
 
 ## 模型说明
