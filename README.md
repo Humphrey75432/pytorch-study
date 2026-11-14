@@ -9,6 +9,7 @@
 - 自动选择 CUDA / MPS / CPU
 - 保存最佳模型与训练记录
 - 加载模型预测，并生成带标签的预测结果图
+- 可视化训练曲线、预测错误样本和第一层权重
 - 基础单元测试
 
 项目使用 [uv](https://docs.astral.sh/uv/) 管理 Python 解释器、虚拟环境和依赖。
@@ -52,7 +53,7 @@ uv run main.py
 当前环境实测：
 
 - MLP：默认 5 轮，测试集准确率约 **97.8%**
-- CNN：5 轮、batch size 128，测试集准确率 **99.15%**
+- CNN：5 轮、batch size 128，测试集准确率 **99.17%**
 
 ### 预测并生成结果图
 
@@ -65,6 +66,50 @@ uv run python -m mnist_nn.predict --checkpoint artifacts/mnist_cnn.pt --count 16
 ```
 
 脚本会读取测试集前 16 张图片，打印真实标签、预测标签和置信度，并生成对应的 PNG 图片。
+
+## 可视化
+
+训练完成后，可以生成训练曲线、错误样本和第一层权重：
+
+```powershell
+# CNN
+uv run python -m mnist_nn.visualize --checkpoint artifacts/mnist_cnn.pt --history artifacts/history_cnn.json --output-dir artifacts/plots_cnn
+
+# MLP
+uv run python -m mnist_nn.visualize --checkpoint artifacts/mnist_mlp.pt --history artifacts/history_mlp.json --output-dir artifacts/plots_mlp
+```
+
+会生成三张图：
+
+| 文件 | 内容 |
+| --- | --- |
+| `training_curves.png` | 训练集/验证集的 loss 和 accuracy 曲线，标出最佳 epoch |
+| `misclassified.png` | 测试集中预测错误的样本，标注真实标签、预测标签和置信度 |
+| `first_layer_weights.png` | 第一层权重：CNN 展示卷积核，MLP 展示像素模板 |
+
+如果测试集没有预测错误的样本，`misclassified.png` 不会生成。
+
+第一层权重的颜色约定：红色表示正权重，蓝色表示负权重。CNN 的 3×3 卷积核通常看起来像边缘/方向检测器；MLP 的权重被 reshape 成 28×28，看起来会更像模糊的像素模板。
+
+### CNN 可视化
+
+**训练曲线**
+
+![CNN 训练曲线](docs/images/cnn_training_curves.png)
+
+**预测错误样本**
+
+![CNN 错误样本](docs/images/cnn_misclassified.png)
+
+**第一层卷积核**
+
+![CNN 第一层卷积核](docs/images/cnn_first_layer_weights.png)
+
+### MLP 对照
+
+MLP 的第一层权重没有卷积核的局部结构，更像模糊的像素模板：
+
+![MLP 第一层权重](docs/images/mlp_first_layer_weights.png)
 
 ## GPU 说明
 
@@ -94,7 +139,7 @@ uv run python -m mnist_nn.train --device cuda
 - 对这个小型 MLP，CPU 的 3～4 秒/轮已经很快，默认 GPU 配置反而略慢
 - 换成 CNN、更大的全连接层、更大的 batch，或者更复杂的数据集后，GPU 的优势才会明显
 
-CNN 有 421,642 个参数和卷积层，GPU 利用率比 MLP 高一些。当前实测 CNN 5 轮、batch size 128 在 RTX 5080 上约 23.7 秒，测试准确率 **99.15%**。
+CNN 有 421,642 个参数和卷积层，GPU 利用率比 MLP 高一些。当前实测 CNN 5 轮、batch size 128 在 RTX 5080 上约 23.7 秒，测试准确率 **99.17%**。
 
 **让 RTX 5080 跑满：预加载 + 大 batch**
 
@@ -111,7 +156,7 @@ uv run python -m mnist_nn.train --preload --batch-size 1024 --epochs 10 --lr 0.0
 | MLP，CPU，默认 5 轮 | 约 18 秒 | 97.80% |
 | MLP，GPU，默认 5 轮 | 约 29 秒 | 97.80% |
 | MLP，GPU，`--preload` + batch 1024 + 10 轮 | 约 12.5 秒 | 97.89% |
-| CNN，GPU，batch 128 + 5 轮 | 约 23.7 秒 | **99.15%** |
+| CNN，GPU，batch 128 + 5 轮 | 约 23.7 秒 | **99.17%** |
 
 这 12.5 秒里，预加载约 5.8 秒，第一轮包含 CUDA 初始化约 6.2 秒；从第二轮开始每轮不到 0.1 秒。因此训练轮数越多，GPU 的优势越明显。若只是跑 5 轮，CPU 反而更省事。
 
@@ -137,9 +182,13 @@ pytorch-study/
 │   ├── model.py             # MLP / CNN 模型与检查点加载
 │   ├── train.py             # 训练 / 验证 / 测试流程
 │   ├── predict.py           # 推理与预测结果可视化
+│   ├── visualize.py         # 训练曲线、错误样本、第一层权重可视化
 │   └── utils.py             # 设备选择、随机种子等
+├── docs/
+│   └── images/              # README 展示用图片
 └── tests/
-    └── test_model.py        # 不依赖数据下载的单元测试
+    ├── test_model.py        # MLP/CNN 结构测试
+    └── test_visualize.py    # 可视化函数测试
 ```
 
 ## 模型说明
@@ -180,7 +229,7 @@ CNN 参数量为 **421,642**。卷积核在图像上滑动，能保留局部空�
 - 数据划分：训练集 55000 / 验证集 5000 / 测试集 10000
 - 每轮在验证集上评估，只保存验证准确率最高的检查点；训练结束后再用该检查点测试一次
 
-当前实测：MLP 5 轮约 **97.8%**；CNN 5 轮、batch size 128 约 **99.15%**。
+当前实测：MLP 5 轮约 **97.8%**；CNN 5 轮、batch size 128 约 **99.17%**。
 
 ## 常用参数
 
@@ -231,7 +280,7 @@ uv run python -m mnist_nn.train --model cnn --epochs 5 --batch-size 128
 
 ## 运行测试
 
-测试只构造随机张量验证模型结构，不会下载 MNIST：
+测试覆盖模型结构和可视化函数，不会下载 MNIST：
 
 ```powershell
 uv run pytest -q
