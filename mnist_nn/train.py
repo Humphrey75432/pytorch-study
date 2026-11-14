@@ -144,6 +144,51 @@ def evaluate_tensors(
     return (total_loss / num_samples).item(), (total_correct / num_samples).item()
 
 
+class EarlyStopping:
+    """当验证指标连续若干轮没有提升时触发早停。"""
+
+    def __init__(self, patience: int = 3) -> None:
+        if patience < 1:
+            raise ValueError("patience 必须大于等于 1。")
+        self.patience = patience
+        self.counter = 0
+        self.should_stop = False
+
+    def update(self, improved: bool) -> bool:
+        if improved:
+            self.counter = 0
+        else:
+            self.counter += 1
+        self.should_stop = self.counter >= self.patience
+        return self.should_stop
+
+
+def build_scheduler(
+    name: str,
+    optimizer: torch.optim.Optimizer,
+    epochs: int,
+    step_size: int = 3,
+    gamma: float = 0.5,
+    patience: int = 2,
+) -> torch.optim.lr_scheduler.LRScheduler | None:
+    """创建学习率调度器；none 表示保持固定学习率。"""
+    if name == "none":
+        return None
+    if name == "cosine":
+        return torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=max(1, epochs)
+        )
+    if name == "step":
+        return torch.optim.lr_scheduler.StepLR(
+            optimizer, step_size=step_size, gamma=gamma
+        )
+    if name == "plateau":
+        return torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="min", factor=gamma, patience=patience
+        )
+    raise ValueError(f"未知学习率调度器：{name}")
+
+
 def save_checkpoint(
     path: Path,
     model: nn.Module,
@@ -182,6 +227,32 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--hidden-size", type=int, default=256, help="MLP 第一层隐藏单元数"
     )
     parser.add_argument("--dropout", type=float, default=0.2, help="Dropout 概率")
+    parser.add_argument(
+        "--augment",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="训练集随机旋转/平移/缩放数据增强",
+    )
+    parser.add_argument(
+        "--scheduler",
+        choices=("none", "cosine", "step", "plateau"),
+        default="none",
+        help="学习率调度器：none / cosine / step / plateau",
+    )
+    parser.add_argument("--lr-step-size", type=int, default=3, help="StepLR 的步长")
+    parser.add_argument("--lr-gamma", type=float, default=0.5, help="学习率衰减系数")
+    parser.add_argument(
+        "--lr-patience", type=int, default=2, help="ReduceLROnPlateau 的耐心轮数"
+    )
+    parser.add_argument(
+        "--early-stopping",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="验证准确率不再提升时提前停止",
+    )
+    parser.add_argument(
+        "--early-stopping-patience", type=int, default=3, help="早停耐心轮数"
+    )
     parser.add_argument(
         "--data-dir", type=Path, default=Path("data"), help="MNIST 数据目录"
     )
@@ -227,6 +298,18 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error("--val-size 必须位于 1 到 59999 之间")
     if args.num_workers < 0:
         parser.error("--num-workers 不能为负数")
+    if not 0.0 < args.lr_gamma < 1.0:
+        parser.error("--lr-gamma 必须位于 (0, 1) 区间")
+    if args.lr_step_size < 1:
+        parser.error("--lr-step-size 必须大于等于 1")
+    if args.lr_patience < 1:
+        parser.error("--lr-patience 必须大于等于 1")
+    if args.early_stopping_patience < 1:
+        parser.error("--early-stopping-patience 必须大于等于 1")
+    if args.preload and args.augment:
+        parser.error(
+            "--preload 和 --augment 不能同时使用：预加载会把增强后的图片固定下来"
+        )
     return args
 
 
@@ -254,6 +337,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         val_size=args.val_size,
         seed=args.seed,
         download=args.download,
+        augment=args.augment,
     )
 
     tensors: TensorBatches | None = None
@@ -283,6 +367,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     ).to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    scheduler = build_scheduler(
+        args.scheduler,
+        optimizer,
+        epochs=args.epochs,
+        step_size=args.lr_step_size,
+        gamma=args.lr_gamma,
+        patience=args.lr_patience,
+    )
+    early_stopping = (
+        EarlyStopping(args.early_stopping_patience) if args.early_stopping else None
+    )
 
     model_config: dict[str, float | int] = {"dropout": args.dropout}
     if args.model == "mlp":
@@ -308,17 +403,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(
         f"训练配置    : epochs={args.epochs}, batch_size={args.batch_size}, lr={args.lr}"
     )
+    print(f"数据增强    : {'开启' if args.augment else '关闭'}")
+    print(f"学习率调度  : {args.scheduler}")
+    if early_stopping is not None:
+        print(f"早停        : patience={early_stopping.patience}")
     if args.preload and device.type == "cuda" and args.batch_size < 512:
         print("提示        : 预加载模式下，GPU 使用 --batch-size 1024 或更大通常更快。")
     print()
 
     best_val_accuracy = -1.0
     best_epoch = 0
+    stopped_early = False
     history: list[dict[str, float | int]] = []
     training_start = time.perf_counter()
 
     for epoch in range(1, args.epochs + 1):
         epoch_start = time.perf_counter()
+        epoch_lr = optimizer.param_groups[0]["lr"]
         if tensors is not None:
             train_loss, train_accuracy = train_one_epoch_tensors(
                 model,
@@ -362,6 +463,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "train_accuracy": train_accuracy,
                 "val_loss": val_loss,
                 "val_accuracy": val_accuracy,
+                "lr": epoch_lr,
                 "seconds": elapsed,
             }
         )
@@ -370,8 +472,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"Epoch {epoch:02d}/{args.epochs:02d} | "
             f"train loss {train_loss:.4f} acc {train_accuracy:.2%} | "
             f"val loss {val_loss:.4f} acc {val_accuracy:.2%} | "
-            f"{elapsed:.1f}s{marker}"
+            f"lr {epoch_lr:.2e} | {elapsed:.1f}s{marker}"
         )
+
+        if scheduler is not None:
+            if args.scheduler == "plateau":
+                scheduler.step(val_loss)
+            else:
+                scheduler.step()
+
+        if early_stopping is not None and early_stopping.update(improved):
+            stopped_early = True
+            print(f"早停：验证准确率连续 {early_stopping.patience} 轮没有提升。")
+            break
 
     total_seconds = time.perf_counter() - training_start
     print()
@@ -395,6 +508,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             {
                 "args": _jsonable_args(args),
                 "epochs": history,
+                "stopped_early": stopped_early,
+                "epochs_completed": len(history),
                 "best": {"epoch": best_epoch, "val_accuracy": best_val_accuracy},
                 "test": {"loss": test_loss, "accuracy": test_accuracy},
             },

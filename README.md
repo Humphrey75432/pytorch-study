@@ -10,6 +10,7 @@
 - 保存最佳模型与训练记录
 - 加载模型预测，并生成带标签的预测结果图
 - 可视化训练曲线、预测错误样本和第一层权重
+- 学习率调度、早停、数据增强和 Dropout 对比实验
 - 基础单元测试
 
 项目使用 [uv](https://docs.astral.sh/uv/) 管理 Python 解释器、虚拟环境和依赖。
@@ -183,11 +184,13 @@ pytorch-study/
 │   ├── train.py             # 训练 / 验证 / 测试流程
 │   ├── predict.py           # 推理与预测结果可视化
 │   ├── visualize.py         # 训练曲线、错误样本、第一层权重可视化
+│   ├── compare_dropout.py   # Dropout 对比实验
 │   └── utils.py             # 设备选择、随机种子等
 ├── docs/
 │   └── images/              # README 展示用图片
 └── tests/
     ├── test_model.py        # MLP/CNN 结构测试
+    ├── test_training.py     # 学习率调度、早停、数据增强测试
     └── test_visualize.py    # 可视化函数测试
 ```
 
@@ -231,6 +234,70 @@ CNN 参数量为 **421,642**。卷积核在图像上滑动，能保留局部空�
 
 当前实测：MLP 5 轮约 **97.8%**；CNN 5 轮、batch size 128 约 **99.17%**。
 
+## 训练技巧
+
+### 学习率调度
+
+```powershell
+# 余弦退火
+uv run python -m mnist_nn.train --model cnn --epochs 15 --scheduler cosine
+
+# 每 3 轮乘以 0.5
+uv run python -m mnist_nn.train --model cnn --epochs 15 --scheduler step --lr-step-size 3 --lr-gamma 0.5
+
+# 验证 loss 停滞时降低学习率
+uv run python -m mnist_nn.train --model cnn --epochs 15 --scheduler plateau --lr-patience 2 --lr-gamma 0.5
+```
+
+每个 epoch 的实际学习率会写入 `history_*.json` 的 `lr` 字段。
+
+### 早停
+
+```powershell
+uv run python -m mnist_nn.train --model cnn --epochs 30 --early-stopping --early-stopping-patience 3
+```
+
+连续 3 轮验证准确率没有提升时停止训练。最佳检查点仍然按验证准确率保存，不会因为早停而丢失。
+
+### 数据增强
+
+```powershell
+uv run python -m mnist_nn.train --model cnn --epochs 15 --augment --scheduler cosine --early-stopping
+```
+
+训练集会随机做：
+
+- ±10° 旋转
+- ±10% 平移
+- 0.9～1.1 倍缩放
+
+验证集和测试集不做增强。`--augment` 不能和 `--preload` 同时使用，因为预加载会把增强后的图片固定下来，无法每个 epoch 重新随机。
+
+### Dropout 对比实验
+
+```powershell
+uv run python -m mnist_nn.compare_dropout --model cnn --dropouts 0.0 0.2 0.5 --epochs 5 --batch-size 128
+```
+
+脚本会分别训练不同 Dropout 概率的模型，输出：
+
+- `artifacts/dropout_compare/dropout_results.csv`
+- `artifacts/dropout_compare/dropout_comparison.png`
+
+每个实验的完整模型和训练记录会保存在对应的 `dropout_*` 子目录里。
+
+本次 CNN、5 轮的实测结果：
+
+| Dropout | 最佳验证准确率 | 测试准确率 |
+| --- | --- | --- |
+| 0.0 | 98.88% | 99.04% |
+| 0.2 | **99.00%** | **99.22%** |
+| 0.5 | 98.94% | 99.17% |
+
+![CNN Dropout 对比](docs/images/cnn_dropout_comparison.png)
+
+5 轮训练时不同 Dropout 的差距还比较小；训练轮数更多、模型更大时，Dropout 对过拟合的影响会更明显。
+
 ## 常用参数
 
 ### 训练
@@ -247,6 +314,13 @@ uv run python -m mnist_nn.train --help
 | `--lr` | `0.001` | Adam 学习率 |
 | `--hidden-size` | `256` | MLP 第一层隐藏单元数（CNN 忽略） |
 | `--dropout` | `0.2` | Dropout 概率 |
+| `--augment` | 关闭 | 训练集随机旋转/平移/缩放 |
+| `--scheduler` | `none` | `none` / `cosine` / `step` / `plateau` |
+| `--lr-step-size` | `3` | StepLR 的步长 |
+| `--lr-gamma` | `0.5` | 学习率衰减系数 |
+| `--lr-patience` | `2` | ReduceLROnPlateau 的耐心轮数 |
+| `--early-stopping` | 关闭 | 验证准确率停滞时早停 |
+| `--early-stopping-patience` | `3` | 早停耐心轮数 |
 | `--device` | `auto` | `auto` / `cpu` / `cuda` / `mps` |
 | `--data-dir` | `data` | 数据集目录 |
 | `--output-dir` | `artifacts` | 模型和记录输出目录 |

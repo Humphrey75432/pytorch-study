@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import torch
-from torch.utils.data import DataLoader, Dataset, random_split
+from torch.utils.data import DataLoader, Dataset, Subset, random_split
 from torchvision import datasets, transforms
 
 from mnist_nn.constants import MNIST_MEAN, MNIST_STD
@@ -22,6 +22,7 @@ class DataConfig:
     val_size: int = 5_000
     seed: int = 42
     download: bool = True
+    augment: bool = False
 
 
 @dataclass(frozen=True)
@@ -36,14 +37,23 @@ class TensorBatches:
     test_labels: torch.Tensor
 
 
-def build_transform() -> transforms.Compose:
-    """把 PIL 图片转成张量，并按 MNIST 的均值/标准差标准化。"""
-    return transforms.Compose(
-        [
-            transforms.ToTensor(),
-            transforms.Normalize((MNIST_MEAN,), (MNIST_STD,)),
-        ]
-    )
+def build_transform(augment: bool = False) -> transforms.Compose:
+    """把 PIL 图片转成张量，并按 MNIST 的均值/标准差标准化。
+
+    augment=True 时只在训练集上追加随机旋转、平移和缩放，验证/测试集不变。
+    """
+    steps = [transforms.ToTensor()]
+    if augment:
+        steps.append(
+            transforms.RandomAffine(
+                degrees=10,
+                translate=(0.1, 0.1),
+                scale=(0.9, 1.1),
+                fill=0,
+            )
+        )
+    steps.append(transforms.Normalize((MNIST_MEAN,), (MNIST_STD,)))
+    return transforms.Compose(steps)
 
 
 def build_datasets(config: DataConfig) -> tuple[Dataset, Dataset, Dataset]:
@@ -56,11 +66,12 @@ def build_datasets(config: DataConfig) -> tuple[Dataset, Dataset, Dataset]:
         raise ValueError("val_size 必须位于 1 到 59999 之间。")
 
     transform = build_transform()
+    train_transform = build_transform(augment=config.augment)
     train_full = datasets.MNIST(
         root=config.data_dir,
         train=True,
         download=config.download,
-        transform=transform,
+        transform=train_transform,
     )
     test_set = datasets.MNIST(
         root=config.data_dir,
@@ -70,11 +81,24 @@ def build_datasets(config: DataConfig) -> tuple[Dataset, Dataset, Dataset]:
     )
 
     generator = torch.Generator().manual_seed(config.seed)
-    train_set, val_set = random_split(
-        train_full,
-        [len(train_full) - config.val_size, config.val_size],
-        generator=generator,
-    )
+    if config.augment:
+        # random_split 会让验证集也继承训练集的随机增强，所以这里显式切分：
+        # 训练子集用增强 transform，验证子集用无增强的同一批原始图片。
+        eval_train_full = datasets.MNIST(
+            root=config.data_dir,
+            train=True,
+            download=False,
+            transform=transform,
+        )
+        indices = torch.randperm(len(train_full), generator=generator).tolist()
+        train_set = Subset(train_full, indices[: -config.val_size])
+        val_set = Subset(eval_train_full, indices[-config.val_size :])
+    else:
+        train_set, val_set = random_split(
+            train_full,
+            [len(train_full) - config.val_size, config.val_size],
+            generator=generator,
+        )
     return train_set, val_set, test_set
 
 
@@ -125,7 +149,12 @@ def build_tensor_data(config: DataConfig, device: torch.device) -> TensorBatches
     MNIST 很小，float32 下全部数据约 240 MB，完全可以常驻显存。
     这样可以避免每个 batch 都经过 DataLoader、Python 预处理和 CPU->GPU 拷贝，
     配合较大的 batch size 能显著提高 GPU 利用率。
+
+    数据增强需要每个 epoch 重新随机变换，因此不能和这个预加载路径同时使用。
     """
+    if config.augment:
+        raise ValueError("预加载模式不支持数据增强，请关闭 --augment 或 --preload。")
+
     train_set, val_set, test_set = build_datasets(config)
 
     def materialize(dataset: Dataset) -> tuple[torch.Tensor, torch.Tensor]:
